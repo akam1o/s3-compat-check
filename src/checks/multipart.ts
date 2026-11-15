@@ -89,7 +89,8 @@ export const multipartCheck: Check = {
         ctx.note("CompleteMultipartUpload did not return an ETag");
       }
     } catch (error) {
-      if (!completed) {
+      // After an interrupt the runner's cleanup (which has its own deadline) aborts it.
+      if (!completed && !ctx.signal.aborted) {
         try {
           await ctx.send(
             new AbortMultipartUploadCommand({ Bucket: ctx.bucket, Key: key, UploadId: uploadId }),

@@ -71,7 +71,7 @@ jobs:
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER="$TEST_ACCESS_KEY" -e MINIO_ROOT_PASSWORD="$TEST_SECRET_KEY" \
             "$MINIO_IMAGE" server /data
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             curl -fsS http://localhost:9000/minio/health/live && exit 0
             sleep 1
           done
@@ -126,7 +126,7 @@ jobs:
           EOF
           docker run -d --name seaweedfs -p 8333:8333 -v "$RUNNER_TEMP/seaweedfs:/etc/seaweedfs-s3:ro" \
             "$SEAWEEDFS_IMAGE" server -s3 -s3.config=/etc/seaweedfs-s3/s3.json
-          for i in $(seq 1 90); do
+          for _ in $(seq 1 90); do
             aws --endpoint-url http://localhost:8333 s3 mb s3://test-bucket 2>/dev/null && exit 0
             sleep 1
           done
