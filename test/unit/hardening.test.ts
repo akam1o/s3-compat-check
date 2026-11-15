@@ -133,6 +133,89 @@ describe("versioning-suspended buckets", () => {
   });
 });
 
+describe("version listing after uncertain writes", () => {
+  function hangingPutThenDenyVersions(fake: FakeS3, versioning: string | undefined) {
+    let first = true;
+    fake.overrides.PutObject = (input, f) => {
+      f.handle("PutObject", input);
+      if (first) {
+        first = false;
+        // Stored, but the response never arrives.
+        return new Promise(() => undefined);
+      }
+      return f.handle("PutObject", input);
+    };
+    fake.overrides.ListObjectVersions = () => {
+      throw s3Error(403, "AccessDenied");
+    };
+    fake.overrides.GetBucketVersioning = () => ({
+      $metadata: { httpStatusCode: 200 },
+      ...(versioning ? { Status: versioning } : {}),
+    });
+  }
+
+  it("fails cleanup when versions cannot be verified on a versioned bucket", async () => {
+    const fake = new FakeS3();
+    hangingPutThenDenyVersions(fake, "Enabled");
+    const report = await run(fake, { checks: ["put"], timeoutMs: 100 });
+    expect(report.checks[0]?.error?.kind).toBe("timeout");
+    expect(report.cleanup.status).toBe("failed");
+    expect(report.cleanup.errors.some((e) => e.operation === "ListObjectVersions")).toBe(true);
+  });
+
+  it("tolerates denied version listing if the bucket was never versioned", async () => {
+    const fake = new FakeS3();
+    hangingPutThenDenyVersions(fake, undefined);
+    const report = await run(fake, { checks: ["put"], timeoutMs: 100 });
+    expect(report.cleanup).toMatchObject({ status: "completed", errors: [] });
+    expect(fake.objects.size).toBe(0);
+  });
+
+  it('a "null" version id alone does not require version listing', async () => {
+    const fake = new FakeS3();
+    fake.overrides.PutObject = (input, f) => ({
+      ...(f.handle("PutObject", input) as object),
+      VersionId: "null",
+    });
+    fake.overrides.ListObjectVersions = () => {
+      throw s3Error(501, "NotImplemented");
+    };
+    const report = await run(fake, { checks: ["put"] });
+    expect(report.cleanup).toMatchObject({ status: "completed", errors: [] });
+  });
+});
+
+describe("null-version fallback bookkeeping", () => {
+  it("keeps tracking the object when the fallback delete also fails", async () => {
+    const fake = new FakeS3();
+    fake.objects.set(`${PREFIX}x`, { body: Buffer.from("x"), etag: '"e"' });
+    fake.overrides.DeleteObject = (input) => {
+      if (input.VersionId === "null") throw s3Error(400, "InvalidArgument");
+      throw s3Error(403, "AccessDenied");
+    };
+    const tracker = new ResourceTracker(PREFIX);
+    tracker.addObject(`${PREFIX}x`, "t");
+    tracker.addVersion(`${PREFIX}x`, "null");
+    const stats = new CleanupStats();
+    const d = { send: fake.send as unknown as Send, bucket: "b", tracker, concurrency: 1 };
+    await cleanupTracked(d, stats);
+    expect(tracker.pendingObjects().map((o) => o.key)).toEqual([`${PREFIX}x`]);
+    expect(stats.errors).toHaveLength(1);
+  });
+});
+
+describe("cleanup budget", () => {
+  it("keeps the final cleanup and verification within --cleanup-timeout", async () => {
+    const fake = new FakeS3();
+    fake.overrides.ListObjectVersions = () => new Promise(() => undefined);
+    fake.overrides.ListMultipartUploads = () => new Promise(() => undefined);
+    const report = await run(fake, { checks: ["put"], timeoutMs: 1_000, cleanupTimeoutMs: 600 });
+    // Per-check cleanup is fast; the hanging final phase must respect the budget.
+    expect(report.cleanup.durationMs).toBeLessThan(900);
+    expect(report.cleanup.status).toBe("failed");
+  });
+});
+
 describe("incomplete listings", () => {
   it("fails cleanup instead of reporting a clean sweep", async () => {
     const fake = new FakeS3();
@@ -179,6 +262,33 @@ describe("observer callbacks", () => {
     );
     expect(report.checks[0]?.status).toBe("passed");
     expect(fake.objects.size).toBe(0);
+  });
+
+  it("an async onCheckComplete that rejects causes no unhandled rejection", async () => {
+    const fake = new FakeS3();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const report = await run(
+        fake,
+        {
+          onCheckComplete: async () => {
+            throw new Error("async callback broke");
+          },
+          logger: async () => {
+            throw new Error("async logger broke");
+          },
+        },
+        [writer],
+      );
+      await sleep(20);
+      expect(report.ok).toBe(true);
+      expect(fake.objects.size).toBe(0);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 
   it("a throwing onCheckComplete does not prevent cleanup", async () => {
@@ -233,6 +343,19 @@ describe("check strictness", () => {
     };
     const report = await run(fake, { checks: ["checksum"] });
     expect(report.checks[0]).toMatchObject({ status: "failed", error: { kind: "assertion" } });
+  });
+
+  it("checksum: an unrelated 400 is not proof of validation", async () => {
+    const fake = new FakeS3();
+    fake.overrides.PutObject = (input, f) => {
+      if ((input.Key as string).endsWith("mismatch.bin")) throw s3Error(400, "MalformedXML");
+      return f.handle("PutObject", input);
+    };
+    const report = await run(fake, { checks: ["checksum"] });
+    expect(report.checks[0]).toMatchObject({
+      status: "failed",
+      error: { kind: "assertion", actual: '"400 MalformedXML"' },
+    });
   });
 
   it("checksum: claiming support via PutObject and accepting a bad checksum fails", async () => {

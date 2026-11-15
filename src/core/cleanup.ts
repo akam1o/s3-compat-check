@@ -1,6 +1,7 @@
 import {
   AbortMultipartUploadCommand,
   DeleteObjectCommand,
+  GetBucketVersioningCommand,
   ListMultipartUploadsCommand,
   ListObjectsV2Command,
   ListObjectVersionsCommand,
@@ -85,11 +86,11 @@ async function deleteKey(
   stats: CleanupStats,
   key: string,
   versionId?: string,
-): Promise<void> {
+): Promise<boolean> {
   // Defense in depth: never delete anything outside the run namespace.
   if (!deps.tracker.owns(key)) {
     stats.warnings.push(`Skipped deleting a key outside the run prefix`);
-    return;
+    return false;
   }
   try {
     await deps.send(
@@ -101,19 +102,22 @@ async function deleteKey(
     );
     stats.deletedObjects++;
     deps.tracker.markDeleted(key, versionId);
+    return true;
   } catch (error) {
     if (isNotFound(error, ["NoSuchKey", "NoSuchVersion"])) {
       deps.tracker.markDeleted(key, versionId);
-      return;
+      return true;
     }
     const info = httpErrorInfo(error);
     if (versionId === "null" && info && (info.httpStatus === 400 || info.httpStatus === 501)) {
-      // Some implementations reject an explicit "null" version id; fall back to a plain delete.
-      deps.tracker.markDeleted(key, versionId);
-      await deleteKey(deps, stats, key);
-      return;
+      // Some implementations reject an explicit "null" version id; fall back to
+      // a plain delete, and only stop tracking the version if that succeeds.
+      const ok = await deleteKey(deps, stats, key);
+      if (ok) deps.tracker.markDeleted(key, versionId);
+      return ok;
     }
     stats.recordError("DeleteObject", error, key);
+    return false;
   }
 }
 
@@ -219,10 +223,23 @@ async function listVersions(deps: CleanupDeps): Promise<Array<{ key: string; ver
   );
 }
 
+/** True only if the bucket has provably never had versioning enabled. */
+async function bucketNeverVersioned(deps: CleanupDeps): Promise<boolean> {
+  try {
+    const res = await deps.send(new GetBucketVersioningCommand({ Bucket: deps.bucket }));
+    return res.Status === undefined;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * List versions under the run prefix. Versioning may be active even if no
  * write reported a version id (e.g. a timed-out PUT), so this is always
- * attempted; failures only count as errors when versioning was observed.
+ * attempted. If listing is unavailable, that is only tolerated when no real
+ * version id was seen and either every write had a definite outcome or the
+ * bucket provably never had versioning enabled; otherwise the cleanup cannot
+ * be verified and is reported as failed.
  */
 async function tryListVersions(
   deps: CleanupDeps,
@@ -231,7 +248,11 @@ async function tryListVersions(
   try {
     return await listVersions(deps);
   } catch (error) {
-    if (!deps.tracker.versioningObserved && isVersionListingUnavailable(error)) {
+    if (
+      !deps.tracker.versioningObserved &&
+      isVersionListingUnavailable(error) &&
+      (!deps.tracker.uncertainWrites || (await bucketNeverVersioned(deps)))
+    ) {
       return [];
     }
     stats.recordError("ListObjectVersions", error);

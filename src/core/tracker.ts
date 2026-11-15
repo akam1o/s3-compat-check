@@ -57,8 +57,16 @@ export class ResourceTracker {
     const obj = this.objects.get(key);
     if (!obj || !versionId) return;
     obj.versions.add(versionId);
-    this.versioningObserved = true;
+    // Some servers echo "null" even on unversioned buckets; only a real id
+    // proves that the bucket keeps versions.
+    if (versionId !== "null") this.versioningObserved = true;
   }
+
+  /**
+   * Set when a write timed out or lost its connection: the server may have
+   * stored it (and a version) without us seeing a version id.
+   */
+  uncertainWrites = false;
 
   markDeleted(key: string, versionId?: string): void {
     const obj = this.objects.get(key);

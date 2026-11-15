@@ -33,9 +33,12 @@ export interface RunOptions extends ConfigInput {
   /** Abort the run. Cleanup still runs, bounded by its own timeout. */
   signal?: AbortSignal;
   /** Receives verbose diagnostics (already redacted). Nothing is logged by default. */
-  logger?: (message: string) => void;
-  /** Called as each check finishes (in completion order). */
-  onCheckComplete?: (result: CheckResult) => void;
+  logger?: (message: string) => unknown;
+  /**
+   * Called as each check finishes (in completion order). Not awaited; errors
+   * and rejections are ignored and never affect the run or its cleanup.
+   */
+  onCheckComplete?: (result: CheckResult) => unknown;
   /** Environment used for defaults and redaction. Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
 }
@@ -45,6 +48,14 @@ export interface RunDependencies {
   checks?: readonly Check[];
   client?: Pick<S3Client, "send"> & Partial<Pick<S3Client, "config" | "destroy">>;
 }
+
+/** Operations that may create an object version even if their response is lost. */
+const WRITE_OPERATIONS = new Set([
+  "PutObject",
+  "CompleteMultipartUpload",
+  "DeleteObject",
+  "CopyObject",
+]);
 
 /** Metadata of every available check, in execution/display order. */
 export function listChecks(): Array<Pick<Check, "id" | "name" | "description" | "required">> {
@@ -162,7 +173,15 @@ async function runOne(
     };
   }
 
-  const send = timedSend(client, config.timeoutMs, signal, onCall);
+  const send = timedSend(client, config.timeoutMs, signal, (op, ms, err) => {
+    if (err && WRITE_OPERATIONS.has(op)) {
+      const kind = classifyError(err).kind;
+      if (kind === "timeout" || kind === "network" || kind === "aborted") {
+        tracker.uncertainWrites = true;
+      }
+    }
+    onCall(op, ms, err);
+  });
   const ctx = createCheckContext({
     checkId: check.id,
     bucket: config.bucket,
@@ -239,22 +258,29 @@ export async function runChecksWith(
   const redactor = createRedactor(env);
   const userLogger = options.logger;
   // Observer callbacks must never be able to break the run or skip cleanup.
-  const logger = userLogger
-    ? (m: string) => {
-        try {
-          userLogger(redactor.redact(m));
-        } catch {
-          // ignore
-        }
-      }
-    : undefined;
-  const notifyComplete = (result: CheckResult) => {
+  // Async callbacks are not awaited, and their rejections are swallowed.
+  const observe = (fn: () => unknown, onError: (error: unknown) => void) => {
     try {
-      options.onCheckComplete?.(redactor.redactDeep(result));
+      const out = fn();
+      if (out && typeof (out as PromiseLike<unknown>).then === "function") {
+        Promise.resolve(out).catch(onError);
+      }
     } catch (error) {
-      logger?.(`onCheckComplete threw: ${classifyError(error).message}`);
+      onError(error);
     }
   };
+  const logger = userLogger
+    ? (m: string) =>
+        observe(
+          () => userLogger(redactor.redact(m)),
+          () => undefined,
+        )
+    : undefined;
+  const notifyComplete = (result: CheckResult) =>
+    observe(
+      () => options.onCheckComplete?.(redactor.redactDeep(result)),
+      (error) => logger?.(`onCheckComplete failed: ${classifyError(error).message}`),
+    );
   const runSignal = options.signal ?? new AbortController().signal;
 
   const startedAt = new Date();
@@ -332,16 +358,17 @@ export async function runChecksWith(
 
     // Always runs, even if the check phase failed unexpectedly. The pool has
     // drained by now, so nothing can still be writing.
+    // The final phase stays within --cleanup-timeout. Part of that budget is
+    // reserved for verification so that a slow sweep cannot hide what is left.
     const cleanupStarted = performance.now();
-    const finalDeps = cleanupDeps(AbortSignal.timeout(config.cleanupTimeoutMs));
+    const verifyBudget = Math.min(
+      Math.max(config.timeoutMs * 2, 1_000),
+      Math.floor(config.cleanupTimeoutMs / 3),
+    );
+    const finalDeps = cleanupDeps(AbortSignal.timeout(config.cleanupTimeoutMs - verifyBudget));
     await cleanupTracked(finalDeps, stats);
     await sweepRunPrefix(finalDeps, stats);
-    // Verification gets its own short budget so an exhausted cleanup
-    // deadline does not hide what is left.
-    const remaining = await findRemaining(
-      cleanupDeps(AbortSignal.timeout(config.timeoutMs * 2)),
-      stats,
-    );
+    const remaining = await findRemaining(cleanupDeps(AbortSignal.timeout(verifyBudget)), stats);
     const cleanup: CleanupReport = stats.toReport(remaining, performance.now() - cleanupStarted);
     logger?.(
       `cleanup ${cleanup.status}: ${cleanup.deletedObjects} objects deleted, ${cleanup.abortedUploads} uploads aborted`,

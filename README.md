@@ -147,7 +147,7 @@ npx s3-compat-check \
 | `--region <region>`      | `AWS_REGION` or `us-east-1` | Signing region (`AWS_DEFAULT_REGION` is also honoured).                                                                  |
 | `--prefix <prefix>`      | `s3-compat-check/`          | Base key prefix. Every run creates a unique namespace below it (see [Safety](#security-considerations)).                 |
 | `--timeout <ms>`         | `10000`                     | Timeout for each individual S3 operation, including reading its response body.                                           |
-| `--cleanup-timeout <ms>` | `30000`                     | Time budget for the final cleanup, independent of `--timeout`.                                                           |
+| `--cleanup-timeout <ms>` | `30000`                     | Time budget for the final cleanup including verification (up to a third is reserved for verification).                   |
 | `--concurrency <n>`      | `4`                         | Number of checks run in parallel (1–32). Results are always printed in the same order.                                   |
 | `--format <text\|json>`  | `text`                      | Report format.                                                                                                           |
 | `--output <file>`        |                             | Also write the report (in `--format`) to a file. The text report is still printed to stdout.                             |
@@ -213,7 +213,8 @@ header (501, or 400 `NotImplemented` / `InvalidArgument` / `InvalidRequest`) or
 silently ignores it: a mismatching checksum is accepted and no checksum is ever
 returned (neither by PUT nor by HEAD). If the server returns a checksum that is
 _wrong_, accepts a mismatching checksum after returning a checksum, or rejects the
-mismatch with anything other than HTTP 400 (e.g. `400 BadDigest`), the check
+mismatch with anything other than a checksum-specific HTTP 400 (`BadDigest`,
+`InvalidDigest`, `XAmzContentChecksumMismatch` or `XAmzContentSHA256Mismatch`), the check
 **fails**.
 
 ## JSON output
@@ -291,6 +292,9 @@ credentials), the JSON output is:
 }
 ```
 
+`error.type` is `config` (exit 2), `environment` (exit 3) or `interrupted`
+(exit 130/143).
+
 ## Exit codes
 
 | Code  | Meaning                                                                                        |
@@ -344,8 +348,8 @@ console.log(result.summary); // { total: 4, passed: 4, failed: 0, skipped: 0, un
 
 - `runChecks(options)` resolves to a typed `RunReport` (the same structure as the JSON output).
   It never writes to stdout or stderr (AWS SDK diagnostics are discarded). Pass `logger` to receive
-  redacted diagnostics. Exceptions thrown by `logger` or `onCheckComplete` are ignored and never
-  prevent cleanup.
+  redacted diagnostics. `logger` and `onCheckComplete` are not awaited; exceptions and promise
+  rejections from them are ignored and never prevent cleanup.
 - It throws `ConfigError` for invalid options, `EnvironmentError` when the endpoint or bucket cannot
   be used, and `RunAbortedError` when `signal` fires before any check starts.
 - Options mirror the CLI: `endpoint`, `bucket`, `region`, `prefix`, `timeoutMs`, `cleanupTimeoutMs`,
@@ -409,10 +413,13 @@ policy, scoped to the default prefix:
 ```
 
 The final sweep always tries `ListObjectVersions`. On unversioned buckets a
-`403` or `501` there is tolerated. On versioned or versioning-suspended buckets,
-also grant `s3:ListBucketVersions` (bucket) and `s3:DeleteObjectVersion`
-(objects) so that versions and delete markers can be removed. Permission to
-delete the bucket is **not** needed.
+`403` or `501` there is tolerated. If a write timed out, however, the tool
+cannot know whether it created a version. It then asks `GetBucketVersioning`
+(`s3:GetBucketVersioning`, optional). Cleanup is reported as failed unless the
+bucket was never versioned. On versioned or versioning-suspended buckets, also
+grant `s3:ListBucketVersions` (bucket) and `s3:DeleteObjectVersion` (objects) so
+that versions and delete markers can be removed. Permission to delete the
+bucket is **not** needed.
 
 Without `s3:ListBucket`, S3 returns `403` instead of `404` for missing keys, and
 the `delete` and `nonexistent` checks will fail.

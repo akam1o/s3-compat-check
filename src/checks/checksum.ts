@@ -23,7 +23,6 @@ const CHECKSUM_MISMATCH_CODES = new Set([
   "InvalidDigest",
   "XAmzContentChecksumMismatch",
   "XAmzContentSHA256Mismatch",
-  "InvalidRequest",
 ]);
 
 /** A rejection of the checksum header itself (as opposed to a broken server). */
@@ -102,16 +101,18 @@ export const checksumCheck: Check = {
       throw error;
     }
     ctx.note(`PutObject with wrong checksum: ${describeError(rejected)}`);
-    // Only a 400 proves checksum validation; 403/404/... are unrelated failures.
-    if (rejected.httpStatus !== 400) {
+    // Only a checksum-specific 400 proves validation; 403, 404 or an unrelated
+    // 400 (e.g. MalformedXML) says nothing about checksum support.
+    if (
+      rejected.httpStatus !== 400 ||
+      !rejected.code ||
+      !CHECKSUM_MISMATCH_CODES.has(rejected.code)
+    ) {
       throw new AssertionFailure("Unexpected response to a mismatching checksum", {
-        expected: "400 (e.g. BadDigest)",
+        expected: `400 with one of ${[...CHECKSUM_MISMATCH_CODES].join(", ")}`,
         actual: describeError(rejected),
         operation: "PutObject",
       });
-    }
-    if (!rejected.code || !CHECKSUM_MISMATCH_CODES.has(rejected.code)) {
-      ctx.note(`Mismatching checksum rejected with an uncommon error code`);
     }
   },
 };

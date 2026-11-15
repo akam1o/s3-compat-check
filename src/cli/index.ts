@@ -42,7 +42,7 @@ function processIo(): CliIo {
 async function reportFatal(
   io: CliIo,
   options: CliOptions | undefined,
-  type: "config" | "environment",
+  type: "config" | "environment" | "interrupted",
   message: string,
   detail?: EnvironmentError["detail"],
 ): Promise<void> {
@@ -138,7 +138,7 @@ export async function main(
     return report.ok ? EXIT.OK : EXIT.CHECK_FAILED;
   } catch (error) {
     if (error instanceof RunAbortedError) {
-      await reportFatal(io, options, "environment", "Interrupted before any check ran");
+      await reportFatal(io, options, "interrupted", "Interrupted before any check ran");
       return EXIT.INTERRUPTED;
     }
     if (error instanceof ConfigError) {

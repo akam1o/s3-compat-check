@@ -12,15 +12,15 @@ export interface FatalReport {
   toolVersion: string;
   ok: false;
   error: {
-    /** "config" maps to exit code 2, "environment" to exit code 3. */
-    type: "config" | "environment";
+    /** "config": exit 2, "environment": exit 3, "interrupted": exit 130/143. */
+    type: "config" | "environment" | "interrupted";
     message: string;
     detail?: CheckError;
   };
 }
 
 export function fatalReport(
-  type: "config" | "environment",
+  type: "config" | "environment" | "interrupted",
   message: string,
   detail?: CheckError,
 ): FatalReport {

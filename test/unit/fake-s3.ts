@@ -144,6 +144,9 @@ export class FakeS3 {
           ...(truncated ? { NextContinuationToken: String(start + maxKeys) } : {}),
         };
       }
+      case "GetBucketVersioning":
+        // Never versioned: S3 omits Status entirely.
+        return ok();
       case "ListObjectVersions": {
         // Unversioned bucket: every current object is the "null" version.
         const prefix = (input.Prefix as string | undefined) ?? "";
