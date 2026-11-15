@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { addAbortSignal, type Readable } from "node:stream";
 import type { S3Client } from "@aws-sdk/client-s3";
 import { tagOperation } from "./errors.js";
-import type { Send } from "./s3.js";
+import { bodyDeadline, type Send } from "./s3.js";
 import { withTimeout } from "./timeout.js";
 import type { ResourceTracker } from "./tracker.js";
 
@@ -82,17 +82,26 @@ export function createCheckContext(options: ContextOptions): CheckContext & { no
     onChunk: (chunk: Buffer) => void,
   ): Promise<number> => {
     const stream = toReadable(body);
+    // Bodies from `send` share the request's deadline: headers + body together
+    // must finish within the operation timeout.
+    const deadline = bodyDeadline(body);
     try {
-      return await withTimeout(operation, options.timeoutMs, options.signal, async (signal) => {
-        addAbortSignal(signal, stream);
-        let total = 0;
-        for await (const chunk of stream) {
-          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
-          total += buf.length;
-          onChunk(buf);
-        }
-        return total;
-      });
+      return await withTimeout(
+        operation,
+        deadline?.timeoutMs ?? options.timeoutMs,
+        options.signal,
+        async (signal) => {
+          addAbortSignal(signal, stream);
+          let total = 0;
+          for await (const chunk of stream) {
+            const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+            total += buf.length;
+            onChunk(buf);
+          }
+          return total;
+        },
+        deadline?.op,
+      );
     } catch (error) {
       stream.destroy();
       tagOperation(error, operation);
@@ -122,7 +131,7 @@ export function createCheckContext(options: ContextOptions): CheckContext & { no
       options.tracker.addVersion(key, versionId);
     },
     recordDelete(key, deleteMarkerVersionId) {
-      if (deleteMarkerVersionId && deleteMarkerVersionId !== "null") {
+      if (deleteMarkerVersionId) {
         // Versioned bucket: the delete created a marker that must also be removed.
         options.tracker.addVersion(key, deleteMarkerVersionId);
       } else if (!options.tracker.versioningObserved) {

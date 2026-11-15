@@ -121,9 +121,16 @@ function intInRange(name: string, value: number, min: number, max: number): numb
 /** Resolve the list of check ids to run from `--checks` / `--skip`. */
 export function selectChecks(
   available: readonly string[],
-  include: readonly string[] | undefined,
-  exclude: readonly string[] | undefined,
+  rawInclude: readonly string[] | undefined,
+  rawExclude: readonly string[] | undefined,
 ): string[] {
+  const normalize = (ids: readonly string[] | undefined) =>
+    ids?.map((id) => id.trim().toLowerCase()).filter((id) => id.length > 0);
+  const include = normalize(rawInclude);
+  const exclude = normalize(rawExclude);
+  if (exclude?.includes("all")) {
+    throw new ConfigError("--skip all would skip every check");
+  }
   const known = new Set(available);
   const unknown = [...(include ?? []), ...(exclude ?? [])].filter(
     (id) => id !== "all" && !known.has(id),

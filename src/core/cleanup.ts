@@ -63,6 +63,23 @@ function isNotImplemented(error: unknown): boolean {
   return !!info && (info.httpStatus === 501 || info.code === "NotImplemented");
 }
 
+/** The server cannot (or will not let us) list versions: no versioning support or permission. */
+function isVersionListingUnavailable(error: unknown): boolean {
+  const info = httpErrorInfo(error);
+  if (!info) return false;
+  return (
+    isNotImplemented(error) ||
+    [400, 403, 405].includes(info.httpStatus) ||
+    ["AccessDenied", "MethodNotAllowed", "InvalidArgument", "InvalidRequest"].includes(
+      info.code ?? "",
+    )
+  );
+}
+
+class IncompleteListingError extends Error {
+  override readonly name = "IncompleteListingError";
+}
+
 async function deleteKey(
   deps: CleanupDeps,
   stats: CleanupStats,
@@ -87,6 +104,13 @@ async function deleteKey(
   } catch (error) {
     if (isNotFound(error, ["NoSuchKey", "NoSuchVersion"])) {
       deps.tracker.markDeleted(key, versionId);
+      return;
+    }
+    const info = httpErrorInfo(error);
+    if (versionId === "null" && info && (info.httpStatus === 400 || info.httpStatus === 501)) {
+      // Some implementations reject an explicit "null" version id; fall back to a plain delete.
+      deps.tracker.markDeleted(key, versionId);
+      await deleteKey(deps, stats, key);
       return;
     }
     stats.recordError("DeleteObject", error, key);
@@ -152,10 +176,15 @@ async function listKeys(deps: CleanupDeps): Promise<string[]> {
       }),
     );
     for (const obj of res.Contents ?? []) if (obj.Key) keys.push(obj.Key);
-    if (!res.IsTruncated || !res.NextContinuationToken) break;
+    if (!res.IsTruncated) return keys.filter((k) => deps.tracker.owns(k));
+    if (!res.NextContinuationToken) {
+      throw new IncompleteListingError(
+        "ListObjectsV2 returned IsTruncated=true without a continuation token",
+      );
+    }
     token = res.NextContinuationToken;
   }
-  return keys.filter((k) => deps.tracker.owns(k));
+  throw new IncompleteListingError(`ListObjectsV2 did not finish within ${MAX_LIST_PAGES} pages`);
 }
 
 async function listVersions(deps: CleanupDeps): Promise<Array<{ key: string; versionId: string }>> {
@@ -176,11 +205,38 @@ async function listVersions(deps: CleanupDeps): Promise<Array<{ key: string; ver
         out.push({ key: v.Key, versionId: v.VersionId });
       }
     }
-    if (!res.IsTruncated) break;
+    if (!res.IsTruncated) return out;
+    if (!res.NextKeyMarker && !res.NextVersionIdMarker) {
+      throw new IncompleteListingError(
+        "ListObjectVersions returned IsTruncated=true without a next marker",
+      );
+    }
     keyMarker = res.NextKeyMarker;
     versionMarker = res.NextVersionIdMarker;
   }
-  return out;
+  throw new IncompleteListingError(
+    `ListObjectVersions did not finish within ${MAX_LIST_PAGES} pages`,
+  );
+}
+
+/**
+ * List versions under the run prefix. Versioning may be active even if no
+ * write reported a version id (e.g. a timed-out PUT), so this is always
+ * attempted; failures only count as errors when versioning was observed.
+ */
+async function tryListVersions(
+  deps: CleanupDeps,
+  stats: CleanupStats,
+): Promise<Array<{ key: string; versionId: string }>> {
+  try {
+    return await listVersions(deps);
+  } catch (error) {
+    if (!deps.tracker.versioningObserved && isVersionListingUnavailable(error)) {
+      return [];
+    }
+    stats.recordError("ListObjectVersions", error);
+    return [];
+  }
 }
 
 async function listUploads(deps: CleanupDeps): Promise<Array<{ key: string; uploadId: string }>> {
@@ -205,16 +261,10 @@ export async function sweepRunPrefix(deps: CleanupDeps, stats: CleanupStats): Pr
     stats.recordError("ListObjectsV2", error);
   }
 
-  if (deps.tracker.versioningObserved) {
-    try {
-      const versions = await listVersions(deps);
-      await mapWithConcurrency(versions, deps.concurrency, (v) =>
-        deleteKey(deps, stats, v.key, v.versionId),
-      );
-    } catch (error) {
-      stats.recordError("ListObjectVersions", error);
-    }
-  }
+  const versions = await tryListVersions(deps, stats);
+  await mapWithConcurrency(versions, deps.concurrency, (v) =>
+    deleteKey(deps, stats, v.key, v.versionId),
+  );
 
   try {
     const uploads = await listUploads(deps);
@@ -239,13 +289,7 @@ export async function findRemaining(deps: CleanupDeps, stats: CleanupStats): Pro
     stats.recordError("ListObjectsV2", error);
     for (const obj of deps.tracker.pendingObjects()) remaining.add(obj.key);
   }
-  if (deps.tracker.versioningObserved) {
-    try {
-      for (const v of await listVersions(deps)) remaining.add(v.key);
-    } catch (error) {
-      stats.recordError("ListObjectVersions", error);
-    }
-  }
+  for (const v of await tryListVersions(deps, stats)) remaining.add(v.key);
   for (const u of deps.tracker.pendingUploads()) remaining.add(`${u.key} (multipart upload)`);
   return [...remaining].sort();
 }

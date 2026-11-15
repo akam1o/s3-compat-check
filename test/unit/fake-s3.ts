@@ -144,6 +144,18 @@ export class FakeS3 {
           ...(truncated ? { NextContinuationToken: String(start + maxKeys) } : {}),
         };
       }
+      case "ListObjectVersions": {
+        // Unversioned bucket: every current object is the "null" version.
+        const prefix = (input.Prefix as string | undefined) ?? "";
+        return {
+          ...ok(),
+          IsTruncated: false,
+          Versions: [...this.objects.keys()]
+            .filter((k) => k.startsWith(prefix))
+            .map((k) => ({ Key: k, VersionId: "null", IsLatest: true })),
+          DeleteMarkers: [],
+        };
+      }
       case "ListMultipartUploads":
         return {
           ...ok(),

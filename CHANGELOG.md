@@ -19,4 +19,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   versioned-bucket cleanup, SIGINT/SIGTERM handling.
 - Per-operation timeouts, no SDK retries, bounded concurrency with stable ordering.
 - Redaction of credentials, signatures and presigned URLs from all output.
-- Library API: `runChecks`, `listChecks`, `formatText`, `formatJson`.
+- Library API: `runChecks`, `listChecks`, `formatText`, `formatJson`, `RunAbortedError`.
+
+### Fixed (pre-release cross-model review)
+
+- Cleanup no longer races with in-flight writes when a check fails mid-way, and
+  always runs even if `logger` / `onCheckComplete` throw.
+- `null` versions and delete markers (versioning-suspended buckets) are removed;
+  version listing is always probed; truncated listings without a continuation
+  token fail cleanup instead of reporting it as complete.
+- Credential resolution and URL presigning are bounded by `--timeout`; an abort
+  during preflight is reported as an interruption.
+- Stalled response bodies are reported as timeouts, not connection resets.
+- Redaction now covers header/JSON-style signing values and command-line
+  parser diagnostics; argument errors produce fatal JSON in `--format json` mode;
+  AWS SDK warnings are never printed.
+- `checksum` requires HTTP 400 for a mismatching checksum and fails if a server
+  that returns checksums accepts a mismatch; `list` accepts pages smaller than
+  `MaxKeys`; `nonexistent` explains a HEAD 403; `--skip all` is rejected.

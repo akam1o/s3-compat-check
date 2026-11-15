@@ -17,6 +17,15 @@ const UNSUPPORTED_CODES = new Set([
   "UnsupportedArgument",
 ]);
 
+/** Codes used by S3 and compatible implementations for a checksum mismatch. */
+const CHECKSUM_MISMATCH_CODES = new Set([
+  "BadDigest",
+  "InvalidDigest",
+  "XAmzContentChecksumMismatch",
+  "XAmzContentSHA256Mismatch",
+  "InvalidRequest",
+]);
+
 /** A rejection of the checksum header itself (as opposed to a broken server). */
 function isUnsupportedResponse(error: unknown): boolean {
   const info = httpErrorInfo(error);
@@ -77,20 +86,32 @@ export const checksumCheck: Check = {
         putObject(ctx, badKey, body, { ChecksumSHA256: wrong }),
       );
     } catch (error) {
-      if (error instanceof AssertionFailure && returned === undefined) {
+      // Only call it "unsupported" if the server never claimed checksum support.
+      const claimedSupport = put.ChecksumSHA256 !== undefined || returned !== undefined;
+      if (error instanceof AssertionFailure && !claimedSupport) {
         throw new UnsupportedFeature(
           "x-amz-checksum-sha256 is accepted but ignored: a mismatching checksum was not rejected and no checksum is returned",
+        );
+      }
+      if (error instanceof AssertionFailure) {
+        throw new AssertionFailure(
+          "A mismatching x-amz-checksum-sha256 was accepted although the server returns checksums",
+          { expected: "400 BadDigest", actual: "success", operation: "PutObject" },
         );
       }
       throw error;
     }
     ctx.note(`PutObject with wrong checksum: ${describeError(rejected)}`);
-    if (rejected.httpStatus < 400 || rejected.httpStatus >= 500) {
+    // Only a 400 proves checksum validation; 403/404/... are unrelated failures.
+    if (rejected.httpStatus !== 400) {
       throw new AssertionFailure("Unexpected response to a mismatching checksum", {
-        expected: "4xx (e.g. 400 BadDigest)",
+        expected: "400 (e.g. BadDigest)",
         actual: describeError(rejected),
         operation: "PutObject",
       });
+    }
+    if (!rejected.code || !CHECKSUM_MISMATCH_CODES.has(rejected.code)) {
+      ctx.note(`Mismatching checksum rejected with an uncommon error code`);
     }
   },
 };

@@ -32,7 +32,7 @@ export interface CleanupError {
 
 export interface CleanupReport {
   /** "completed": nothing left behind. "failed": something may remain. */
-  status: "completed" | "failed" | "not-needed";
+  status: "completed" | "failed";
   deletedObjects: number;
   abortedUploads: number;
   /** Keys (all under the run prefix) that could not be removed. */

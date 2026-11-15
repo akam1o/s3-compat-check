@@ -48,9 +48,14 @@ export class ResourceTracker {
     }
   }
 
+  /**
+   * Record a version id returned by a write or delete. The literal "null" is
+   * kept too: on versioning-suspended buckets it identifies the null version
+   * or a null delete marker, which a plain DELETE would not remove.
+   */
   addVersion(key: string, versionId: string | undefined): void {
     const obj = this.objects.get(key);
-    if (!obj || !versionId || versionId === "null") return;
+    if (!obj || !versionId) return;
     obj.versions.add(versionId);
     this.versioningObserved = true;
   }

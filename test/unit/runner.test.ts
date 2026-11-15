@@ -8,7 +8,7 @@ import {
   SkipCheck,
   UnsupportedFeature,
 } from "../../src/core/errors.js";
-import { runChecks, type RunDependencies } from "../../src/core/runner.js";
+import { runChecksWith, type RunDependencies } from "../../src/core/runner.js";
 import { FakeS3, s3Error } from "./fake-s3.js";
 
 const ENV = {
@@ -29,7 +29,7 @@ function check(id: string, run: Check["run"], required = true): Check {
 describe("runChecks with the in-memory fake", () => {
   it("passes every offline check against a well-behaved server and cleans up", async () => {
     const fake = new FakeS3();
-    const report = await runChecks(
+    const report = await runChecksWith(
       { bucket: "test-bucket", endpoint: "http://localhost:9000", env: ENV },
       deps(fake, offline),
     );
@@ -59,7 +59,7 @@ describe("runChecks with the in-memory fake", () => {
       if (input.Range === "bytes=-100") res.ContentRange = "bytes 0-99/1024";
       return res;
     };
-    const report = await runChecks(
+    const report = await runChecksWith(
       {
         bucket: "test-bucket",
         endpoint: "http://localhost:9000",
@@ -88,7 +88,7 @@ describe("runChecks with the in-memory fake", () => {
       if (input.ChecksumSHA256) throw s3Error(501, "NotImplemented");
       return f.handle("PutObject", input);
     };
-    const report = await runChecks(
+    const report = await runChecksWith(
       { bucket: "test-bucket", endpoint: "http://localhost:9000", checks: ["checksum"], env: ENV },
       deps(fake, offline),
     );
@@ -106,7 +106,7 @@ describe("runChecks with the in-memory fake", () => {
       const { ChecksumSHA256: _ignored, ...rest } = input;
       return f.handle("PutObject", rest);
     };
-    const report = await runChecks(
+    const report = await runChecksWith(
       { bucket: "test-bucket", endpoint: "http://localhost:9000", checks: ["checksum"], env: ENV },
       deps(fake, offline),
     );
@@ -120,7 +120,7 @@ describe("runChecks with the in-memory fake", () => {
     fake.overrides.GetObject = () => {
       throw s3Error(403, "AccessDenied");
     };
-    const report = await runChecks(
+    const report = await runChecksWith(
       {
         bucket: "test-bucket",
         endpoint: "http://localhost:9000",
@@ -142,7 +142,7 @@ describe("runChecks with the in-memory fake", () => {
       if (++parts === 2) throw s3Error(500, "InternalError");
       return f.handle("UploadPart", input);
     };
-    const report = await runChecks(
+    const report = await runChecksWith(
       { bucket: "test-bucket", endpoint: "http://localhost:9000", checks: ["multipart"], env: ENV },
       deps(fake, offline),
     );
@@ -163,7 +163,7 @@ describe("runChecks orchestration", () => {
       check(`c${i}`, () => new Promise((r) => setTimeout(r, ms))),
     );
     const completed: string[] = [];
-    const report = await runChecks(
+    const report = await runChecksWith(
       {
         bucket: "test-bucket",
         concurrency: 4,
@@ -178,7 +178,7 @@ describe("runChecks orchestration", () => {
 
   it("maps outcomes to statuses", async () => {
     const fake = new FakeS3();
-    const report = await runChecks(
+    const report = await runChecksWith(
       { bucket: "test-bucket", env: ENV },
       deps(fake, [
         check("ok", async () => undefined),
@@ -214,7 +214,7 @@ describe("runChecks orchestration", () => {
 
   it("cleans up objects a failing check created", async () => {
     const fake = new FakeS3();
-    const report = await runChecks(
+    const report = await runChecksWith(
       { bucket: "test-bucket", env: ENV },
       deps(fake, [
         check("writer", async (ctx) => {
@@ -238,7 +238,7 @@ describe("runChecks orchestration", () => {
       body: Buffer.from("k"),
       etag: '"x"',
     });
-    const report = await runChecks(
+    const report = await runChecksWith(
       { bucket: "test-bucket", env: ENV },
       deps(fake, [
         check("sneaky", async (ctx) => {
@@ -265,7 +265,7 @@ describe("runChecks orchestration", () => {
     fake.overrides.DeleteObject = () => {
       throw s3Error(403, "AccessDenied", "Access Denied");
     };
-    const report = await runChecks(
+    const report = await runChecksWith(
       { bucket: "test-bucket", env: ENV },
       deps(fake, [
         check("writer", async (ctx) => {
@@ -290,7 +290,7 @@ describe("runChecks orchestration", () => {
   it("skips remaining checks after an abort and still cleans up", async () => {
     const fake = new FakeS3();
     const controller = new AbortController();
-    const report = await runChecks(
+    const report = await runChecksWith(
       { bucket: "test-bucket", concurrency: 1, env: ENV, signal: controller.signal },
       deps(fake, [
         check("first", async (ctx) => {
@@ -317,7 +317,7 @@ describe("runChecks orchestration", () => {
     const fake = new FakeS3();
     fake.overrides.PutObject = () => new Promise(() => undefined);
     const started = Date.now();
-    const report = await runChecks(
+    const report = await runChecksWith(
       {
         bucket: "test-bucket",
         endpoint: "http://localhost:9000",
@@ -337,7 +337,7 @@ describe("runChecks orchestration", () => {
       throw s3Error(404, "NotFound", "UnknownError");
     };
     await expect(
-      runChecks({ bucket: "missing-bucket", env: ENV }, deps(fake, offline)),
+      runChecksWith({ bucket: "missing-bucket", env: ENV }, deps(fake, offline)),
     ).rejects.toThrow(EnvironmentError);
     expect(fake.calls).toEqual(["HeadBucket"]);
   });
@@ -349,7 +349,9 @@ describe("runChecks orchestration", () => {
         name: "CredentialsProviderError",
       });
     };
-    await expect(runChecks({ bucket: "test-bucket", env: ENV }, deps(fake))).rejects.toMatchObject({
+    await expect(
+      runChecksWith({ bucket: "test-bucket", env: ENV }, deps(fake)),
+    ).rejects.toMatchObject({
       name: "EnvironmentError",
       detail: { kind: "credentials" },
     });
@@ -357,7 +359,7 @@ describe("runChecks orchestration", () => {
 
   it("redacts secrets from check results", async () => {
     const fake = new FakeS3();
-    const report = await runChecks(
+    const report = await runChecksWith(
       { bucket: "test-bucket", env: ENV },
       deps(fake, [
         check("leaky", async (ctx) => {
@@ -377,11 +379,11 @@ describe("runChecks orchestration", () => {
   it("does not log anything unless a logger is given", async () => {
     const fake = new FakeS3();
     const lines: string[] = [];
-    await runChecks(
+    await runChecksWith(
       { bucket: "test-bucket", env: ENV },
       deps(fake, [check("a", async () => undefined)]),
     );
-    await runChecks(
+    await runChecksWith(
       { bucket: "test-bucket", env: ENV, logger: (m) => lines.push(m) },
       deps(fake, [check("a", async () => undefined)]),
     );

@@ -21,11 +21,16 @@ export const nonexistentCheck: Check = {
     );
     ctx.note(`HeadObject: HTTP ${head.httpStatus}, code ${head.code ?? "(none)"}`);
 
-    if (get.httpStatus === 403) {
-      throw new AssertionFailure(
-        "GetObject on a missing key returned 403; S3 does this when s3:ListBucket is not granted",
-        { expected: "404 NoSuchKey", actual: describeError(get), operation: "GetObject" },
-      );
+    for (const [op, observed, expected] of [
+      ["GetObject", get, "404 NoSuchKey"],
+      ["HeadObject", head, "404"],
+    ] as const) {
+      if (observed.httpStatus === 403) {
+        throw new AssertionFailure(
+          `${op} on a missing key returned 403; S3 does this when s3:ListBucket is not granted`,
+          { expected, actual: describeError(observed), operation: op },
+        );
+      }
     }
     assertEqual(get.httpStatus, 404, "HTTP status of GetObject", "GetObject");
     assertEqual(get.code, "NoSuchKey", "Error code of GetObject", "GetObject");

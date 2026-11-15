@@ -33,6 +33,7 @@ const BIN = fileURLToPath(new URL("../../dist/bin.js", import.meta.url));
 const suffix = randomBytes(4).toString("hex");
 const BUCKET = `s3cc-e2e-${suffix}`;
 const VERSIONED_BUCKET = `s3cc-e2e-v-${suffix}`;
+const SUSPENDED_BUCKET = `s3cc-e2e-s-${suffix}`;
 const SENTINEL_KEY = "unrelated/sentinel.txt";
 
 const client = new S3Client({
@@ -112,6 +113,15 @@ beforeAll(async () => {
       VersioningConfiguration: { Status: "Enabled" },
     }),
   );
+  await client.send(new CreateBucketCommand({ Bucket: SUSPENDED_BUCKET }));
+  for (const Status of ["Enabled", "Suspended"] as const) {
+    await client.send(
+      new PutBucketVersioningCommand({
+        Bucket: SUSPENDED_BUCKET,
+        VersioningConfiguration: { Status },
+      }),
+    );
+  }
   // Pre-existing data that the tool must never touch.
   await client.send(new PutObjectCommand({ Bucket: BUCKET, Key: SENTINEL_KEY, Body: "keep me" }));
 });
@@ -119,6 +129,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await emptyAndDeleteBucket(BUCKET).catch(() => undefined);
   await emptyAndDeleteBucket(VERSIONED_BUCKET).catch(() => undefined);
+  await emptyAndDeleteBucket(SUSPENDED_BUCKET).catch(() => undefined);
   client.destroy();
 });
 
@@ -184,6 +195,14 @@ describe("MinIO end-to-end", () => {
     expect(report.cleanup).toMatchObject({ status: "completed", remaining: [] });
     expect(res.code).toBe(0);
     expect(await versionsUnder(VERSIONED_BUCKET, "s3-compat-check/")).toBe(0);
+  });
+
+  it("removes null versions and delete markers on a versioning-suspended bucket", async () => {
+    const res = await runCli([...baseArgs(SUSPENDED_BUCKET), "--format", "json"]);
+    const report = JSON.parse(res.stdout) as RunReport;
+    expect(report.cleanup).toMatchObject({ status: "completed", remaining: [] });
+    expect(res.code).toBe(0);
+    expect(await versionsUnder(SUSPENDED_BUCKET, "s3-compat-check/")).toBe(0);
   });
 
   it("never prints credentials", async () => {

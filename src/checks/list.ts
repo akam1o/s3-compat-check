@@ -88,12 +88,12 @@ export const listCheck: Check = {
       "Listed keys (in order)",
       "ListObjectsV2",
     );
-    assertEqual(
-      pages,
-      Math.ceil(expectedKeys.length / PAGE_SIZE),
-      "Number of pages",
-      "ListObjectsV2",
-    );
+    // MaxKeys is an upper bound, so more (smaller) pages are legitimate.
+    if (pages !== Math.ceil(expectedKeys.length / PAGE_SIZE)) {
+      ctx.note(
+        `Pagination used ${pages} pages for ${expectedKeys.length} keys with MaxKeys=${PAGE_SIZE}`,
+      );
+    }
 
     // Delimiter listing: "a/" and "b/" must be rolled up into CommonPrefixes.
     const op = "ListObjectsV2 with Delimiter";

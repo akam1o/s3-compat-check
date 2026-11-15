@@ -21,9 +21,13 @@ const PATTERNS: Array<[RegExp, string]> = [
     /\b(X-Amz-(?:Signature|Credential|Security-Token)|AWSAccessKeyId|Signature|x-amz-security-token)=[^&\s"'<>]+/gi,
     `$1=${REDACTED}`,
   ],
-  // Authorization headers, in "Header: value" and JSON-ish forms.
+  // Authorization and signing headers, in "Header: value" and JSON-ish forms.
   [/(\bauthorization["']?\s*[:=]\s*["']?)[^"'\r\n}]+/gi, `$1${REDACTED}`],
-  [/(\bx-amz-security-token["']?\s*[:=]\s*["']?)[^"'\r\n,}]+/gi, `$1${REDACTED}`],
+  [
+    /(\b(?:x-amz-(?:security-token|signature|credential)|signature)["']?\s*:\s*["']?)[^"'\s,}<]+/gi,
+    `$1${REDACTED}`,
+  ],
+  [/(\bx-amz-security-token["']?\s*=\s*["']?)[^"'\r\n,}&]+/gi, `$1${REDACTED}`],
   // SigV4 fragments.
   [/\bAWS4-HMAC-SHA256\s+Credential=[^\s"']+/g, `AWS4-HMAC-SHA256 ${REDACTED}`],
   [/\b(Credential|Signature)=[A-Za-z0-9/+=_%-]{8,}/g, `$1=${REDACTED}`],

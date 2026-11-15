@@ -13,9 +13,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Disposable credentials for the throwaway test servers below. Not secrets.
+  # The upstream minio/minio images were removed from Docker Hub; pgsty/minio is
+  # a maintained community build of the same server. Pinned by digest.
   MINIO_IMAGE: pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
   SEAWEEDFS_IMAGE: chrislusf/seaweedfs:4.53@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0
+  # Disposable credentials for the throwaway test servers below. Not secrets.
   TEST_ACCESS_KEY: ACCESS_KEY_EXAMPLE
   TEST_SECRET_KEY: SECRET_KEY_EXAMPLE
 

@@ -146,13 +146,13 @@ npx s3-compat-check \
 | `--bucket <name>`        | (required)                  | An **existing** bucket to run the checks in. Buckets are never created or deleted.                                       |
 | `--region <region>`      | `AWS_REGION` or `us-east-1` | Signing region (`AWS_DEFAULT_REGION` is also honoured).                                                                  |
 | `--prefix <prefix>`      | `s3-compat-check/`          | Base key prefix. Every run creates a unique namespace below it (see [Safety](#security-considerations)).                 |
-| `--timeout <ms>`         | `10000`                     | Timeout for each individual S3 operation.                                                                                |
+| `--timeout <ms>`         | `10000`                     | Timeout for each individual S3 operation, including reading its response body.                                           |
 | `--cleanup-timeout <ms>` | `30000`                     | Time budget for the final cleanup, independent of `--timeout`.                                                           |
 | `--concurrency <n>`      | `4`                         | Number of checks run in parallel (1–32). Results are always printed in the same order.                                   |
 | `--format <text\|json>`  | `text`                      | Report format.                                                                                                           |
 | `--output <file>`        |                             | Also write the report (in `--format`) to a file. The text report is still printed to stdout.                             |
 | `--checks <names>`       | all                         | Comma-separated list of checks to run. May be repeated.                                                                  |
-| `--skip <names>`         |                             | Comma-separated list of checks to skip.                                                                                  |
+| `--skip <names>`         |                             | Comma-separated list of checks to skip (`all` is rejected). Check ids are case-insensitive.                              |
 | `--list-checks`          |                             | Print the available checks and exit.                                                                                     |
 | `--verbose`              |                             | Print per-operation diagnostics to stderr and extra details in the report.                                               |
 | `--no-color`             |                             | Disable colors. Colors are also disabled when stdout is not a TTY or `NO_COLOR` is set.                                  |
@@ -192,7 +192,7 @@ one check failing does not cause others to fail.
 | `head`        | HeadObject         | HEAD returns `Content-Length`, `Content-Type`, user metadata (`x-amz-meta-*`), `ETag` and `Last-Modified`.                                                                       |
 | `delete`      | DeleteObject       | DELETE returns 204 (200 accepted), then GET returns `404 NoSuchKey` and HEAD returns 404; deleting a missing key succeeds.                                                       |
 | `range`       | Range GET          | `bytes=0-99`, `bytes=100-199` and `bytes=-100` return 206, the correct `Content-Range`, `Content-Length` and data.                                                               |
-| `list`        | ListObjectsV2      | `Prefix` filtering, `MaxKeys` pagination with continuation tokens, `KeyCount`, object sizes and `Delimiter` / `CommonPrefixes`.                                                  |
+| `list`        | ListObjectsV2      | `Prefix` filtering, `MaxKeys` pagination with continuation tokens (`MaxKeys` is treated as an upper bound), `KeyCount`, object sizes and `Delimiter` / `CommonPrefixes`.         |
 | `multipart`   | Multipart Upload   | Create, upload 2 parts (5 MiB + ~1 MiB), complete, then verify size and SHA-256 of the downloaded object. The upload is aborted on failure.                                      |
 | `etag`        | ETag               | PUT returns an ETag that HEAD and GET repeat; `If-Match` returns 200, `If-None-Match` returns 304, and a wrong `If-Match` returns 412. **The ETag is not assumed to be an MD5.** |
 | `checksum`    | Checksum           | _Optional._ PUT with `x-amz-checksum-sha256` succeeds, the checksum read back with HEAD matches, and a mismatching checksum is rejected.                                         |
@@ -211,8 +211,10 @@ one check failing does not cause others to fail.
 `checksum` reports `unsupported` when the server either rejects the checksum
 header (501, or 400 `NotImplemented` / `InvalidArgument` / `InvalidRequest`) or
 silently ignores it: a mismatching checksum is accepted and no checksum is ever
-returned. If the server returns a checksum that is _wrong_, or accepts a
-mismatching checksum while claiming support, the check **fails**.
+returned (neither by PUT nor by HEAD). If the server returns a checksum that is
+_wrong_, accepts a mismatching checksum after returning a checksum, or rejects the
+mismatch with anything other than HTTP 400 (e.g. `400 BadDigest`), the check
+**fails**.
 
 ## JSON output
 
@@ -299,6 +301,8 @@ credentials), the JSON output is:
 | `3`   | Fatal environment error: cannot connect, no credentials, access denied, bucket does not exist. |
 | `130` | Interrupted by SIGINT (`143` for SIGTERM) after cleanup was attempted.                         |
 
+Argument errors in `--format json` mode also print the fatal JSON document.
+
 ## CI integration
 
 ```yaml
@@ -339,8 +343,11 @@ console.log(result.summary); // { total: 4, passed: 4, failed: 0, skipped: 0, un
 ```
 
 - `runChecks(options)` resolves to a typed `RunReport` (the same structure as the JSON output).
-  It never writes to stdout or stderr. Pass `logger` to receive redacted diagnostics.
-- It throws `ConfigError` for invalid options and `EnvironmentError` when the endpoint or bucket cannot be used.
+  It never writes to stdout or stderr (AWS SDK diagnostics are discarded). Pass `logger` to receive
+  redacted diagnostics. Exceptions thrown by `logger` or `onCheckComplete` are ignored and never
+  prevent cleanup.
+- It throws `ConfigError` for invalid options, `EnvironmentError` when the endpoint or bucket cannot
+  be used, and `RunAbortedError` when `signal` fires before any check starts.
 - Options mirror the CLI: `endpoint`, `bucket`, `region`, `prefix`, `timeoutMs`, `cleanupTimeoutMs`,
   `concurrency`, `checks`, `skip`, `addressingStyle` (`"path"` / `"virtual-hosted"`), `allowInsecure`,
   plus `credentials` (an AWS SDK credentials object or provider), `signal` (an `AbortSignal`) and `onCheckComplete`.
@@ -358,11 +365,13 @@ The tool **writes to and deletes from** the bucket you point it at. It is design
   anything else under the unique run prefix (for example a write that timed out
   after the server stored it). Every delete is checked against the run prefix
   first. Nothing outside it is ever deleted.
-- **Always cleans up.** Each check's objects are removed as soon as it finishes. A
-  final sweep aborts incomplete multipart uploads and, on versioned buckets,
-  removes the object versions and delete markers it created. Cleanup has its own
-  time budget (`--cleanup-timeout`). If cleanup fails, the report lists the
-  remaining keys and the run exits with code 1.
+- **Always cleans up.** Each check's objects are removed as soon as it finishes
+  (after all of its in-flight requests have settled). A final sweep aborts
+  incomplete multipart uploads and removes the object versions and delete
+  markers under the run prefix, including `null` versions on
+  versioning-suspended buckets. Cleanup has its own time budget
+  (`--cleanup-timeout`). If cleanup fails or a listing is incomplete, the report
+  lists the remaining keys and the run exits with code 1.
 - **Signals.** On SIGINT/SIGTERM, running requests are aborted and cleanup still
   runs. A second signal exits immediately, and the tool gives up waiting after
   45 seconds.
@@ -399,9 +408,11 @@ policy, scoped to the default prefix:
 }
 ```
 
-On versioned buckets, also grant `s3:ListBucketVersions` (bucket) and
-`s3:DeleteObjectVersion` (objects) so that versions and delete markers can be
-removed. Permission to delete the bucket is **not** needed.
+The final sweep always tries `ListObjectVersions`. On unversioned buckets a
+`403` or `501` there is tolerated. On versioned or versioning-suspended buckets,
+also grant `s3:ListBucketVersions` (bucket) and `s3:DeleteObjectVersion`
+(objects) so that versions and delete markers can be removed. Permission to
+delete the bucket is **not** needed.
 
 Without `s3:ListBucket`, S3 returns `403` instead of `404` for missing keys, and
 the `delete` and `nonexistent` checks will fail.

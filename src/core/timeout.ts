@@ -30,9 +30,12 @@ export async function withTimeout<T>(
   timeoutMs: number,
   parent: AbortSignal | undefined,
   fn: (signal: AbortSignal) => Promise<T>,
+  /** Reuse an existing deadline (e.g. a request and its response body). */
+  existing?: OperationSignal,
 ): Promise<T> {
   if (parent?.aborted) throw parentAbortError(parent, operation);
-  const op = operationSignal(timeoutMs, parent);
+  const op = existing ?? operationSignal(timeoutMs, parent);
+  if (op.timedOut()) throw new OperationTimeoutError(operation, timeoutMs);
   const abortError = () =>
     op.timedOut()
       ? new OperationTimeoutError(operation, timeoutMs)

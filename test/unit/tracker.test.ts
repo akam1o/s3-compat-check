@@ -17,7 +17,7 @@ describe("ResourceTracker", () => {
     const t = new ResourceTracker(PREFIX);
     t.addObject(`${PREFIX}a/1`, "a");
     t.addObject(`${PREFIX}b/1`, "b");
-    t.addVersion(`${PREFIX}b/1`, "null");
+    t.addVersion(`${PREFIX}b/1`, undefined);
     expect(t.versioningObserved).toBe(false);
     t.addVersion(`${PREFIX}b/1`, "v1");
     expect(t.versioningObserved).toBe(true);

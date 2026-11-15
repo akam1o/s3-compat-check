@@ -23,6 +23,7 @@ import {
 } from "./result.js";
 import { createS3Client, timedSend, type Credentials, type Send } from "./s3.js";
 import { ResourceTracker } from "./tracker.js";
+import { withTimeout } from "./timeout.js";
 import { TOOL_NAME, TOOL_VERSION, awsSdkVersion } from "./version.js";
 
 export interface RunOptions extends ConfigInput {
@@ -60,7 +61,9 @@ function environmentMessage(bucket: string, detail: CheckError): string {
     case "network":
       return `Cannot connect to the endpoint (${detail.code ?? "network error"})`;
     case "timeout":
-      return `Timed out while connecting to the endpoint`;
+      return detail.operation === "ResolveCredentials"
+        ? detail.message
+        : `Timed out while connecting to the endpoint`;
     case "credentials":
       return `Could not resolve AWS credentials: ${detail.message}`;
     case "http":
@@ -84,25 +87,41 @@ async function preflight(
   send: Send,
   config: ResolvedConfig,
   redactor: Redactor,
+  signal: AbortSignal,
 ): Promise<void> {
+  const fail = (error: unknown, detail: CheckError): never => {
+    if (signal.aborted || error instanceof RunAbortedError) {
+      throw error instanceof RunAbortedError ? error : new RunAbortedError(detail.operation);
+    }
+    throw new EnvironmentError(environmentMessage(config.bucket, detail), detail);
+  };
+
   const credentials = client.config?.credentials;
   if (typeof credentials === "function") {
     try {
-      const resolved = await credentials();
+      // Providers take no abort signal; the race still bounds a hung provider.
+      const resolved = await withTimeout("ResolveCredentials", config.timeoutMs, signal, () =>
+        credentials(),
+      );
       redactor.addSecret(resolved.accessKeyId);
       redactor.addSecret(resolved.secretAccessKey);
       redactor.addSecret(resolved.sessionToken);
     } catch (error) {
-      const detail: CheckError = { ...classifyError(error), kind: "credentials" };
-      throw new EnvironmentError(environmentMessage(config.bucket, detail), detail);
+      const classified = classifyError(error);
+      fail(error, {
+        ...classified,
+        kind: classified.kind === "timeout" ? "timeout" : "credentials",
+        ...(classified.kind === "timeout"
+          ? { message: `Resolving credentials timed out after ${config.timeoutMs} ms` }
+          : {}),
+      });
     }
   }
 
   try {
     await send(new HeadBucketCommand({ Bucket: config.bucket }));
   } catch (error) {
-    const detail = classifyError(error);
-    throw new EnvironmentError(environmentMessage(config.bucket, detail), detail);
+    fail(error, classifyError(error));
   }
 
   // Never write into a namespace that already has content.
@@ -114,6 +133,7 @@ async function preflight(
     existing = res.Contents?.length ?? res.KeyCount ?? 0;
   } catch (error) {
     const detail = classifyError(error);
+    if (signal.aborted) fail(error, detail);
     throw new EnvironmentError(`ListObjectsV2 failed during preflight: ${detail.message}`, detail);
   }
   if (existing > 0) {
@@ -129,6 +149,7 @@ async function runOne(
   client: RunDependencies["client"] & object,
   tracker: ResourceTracker,
   signal: AbortSignal,
+  onCall: (operation: string, durationMs: number, error?: unknown) => void,
   logger: ((message: string) => void) | undefined,
 ): Promise<CheckResult> {
   const base = { id: check.id, name: check.name, required: check.required };
@@ -141,18 +162,7 @@ async function runOne(
     };
   }
 
-  const send = timedSend(client, config.timeoutMs, signal, (op, ms, err) => {
-    if (!logger) return;
-    let outcome = "ok";
-    if (err) {
-      const e = classifyError(err);
-      outcome =
-        e.kind === "http"
-          ? `-> HTTP ${e.httpStatus}${e.code ? ` ${e.code}` : ""}`
-          : `-> ${e.kind}: ${e.message}`;
-    }
-    logger(`[${check.id}] ${op} ${outcome} (${Math.round(ms)} ms)`);
-  });
+  const send = timedSend(client, config.timeoutMs, signal, onCall);
   const ctx = createCheckContext({
     checkId: check.id,
     bucket: config.bucket,
@@ -206,12 +216,18 @@ async function runOne(
 /**
  * Run the selected checks against a bucket and return a typed report.
  *
- * Throws `ConfigError` for invalid options and `EnvironmentError` when the
- * endpoint/bucket cannot be used at all. Never writes to stdout/stderr.
+ * Throws `ConfigError` for invalid options, `EnvironmentError` when the
+ * endpoint/bucket cannot be used at all, and `RunAbortedError` if `signal`
+ * fires before any check starts. Never writes to stdout/stderr.
  */
-export async function runChecks(
+export function runChecks(options: RunOptions): Promise<RunReport> {
+  return runChecksWith(options, {});
+}
+
+/** `runChecks` with test seams. Internal; not exported from the package. */
+export async function runChecksWith(
   options: RunOptions,
-  deps: RunDependencies = {},
+  deps: RunDependencies,
 ): Promise<RunReport> {
   const env = options.env ?? process.env;
   const checks = deps.checks ?? ALL_CHECKS;
@@ -222,17 +238,51 @@ export async function runChecks(
   );
   const redactor = createRedactor(env);
   const userLogger = options.logger;
-  const logger = userLogger ? (m: string) => userLogger(redactor.redact(m)) : undefined;
+  // Observer callbacks must never be able to break the run or skip cleanup.
+  const logger = userLogger
+    ? (m: string) => {
+        try {
+          userLogger(redactor.redact(m));
+        } catch {
+          // ignore
+        }
+      }
+    : undefined;
+  const notifyComplete = (result: CheckResult) => {
+    try {
+      options.onCheckComplete?.(redactor.redactDeep(result));
+    } catch (error) {
+      logger?.(`onCheckComplete threw: ${classifyError(error).message}`);
+    }
+  };
   const runSignal = options.signal ?? new AbortController().signal;
 
   const startedAt = new Date();
   const t0 = performance.now();
   const client = deps.client ?? createS3Client(config, options.credentials);
   const tracker = new ResourceTracker(config.runPrefix);
+  const logCall = (scope: string) => (op: string, ms: number, err?: unknown) => {
+    if (!logger) return;
+    let outcome = "ok";
+    if (err) {
+      const e = classifyError(err);
+      outcome =
+        e.kind === "http"
+          ? `-> HTTP ${e.httpStatus}${e.code ? ` ${e.code}` : ""}`
+          : `-> ${e.kind}: ${e.message}`;
+    }
+    logger(`[${scope}] ${op} ${outcome} (${Math.round(ms)} ms)`);
+  };
 
   try {
     try {
-      await preflight(client, timedSend(client, config.timeoutMs, runSignal), config, redactor);
+      await preflight(
+        client,
+        timedSend(client, config.timeoutMs, runSignal, logCall("preflight")),
+        config,
+        redactor,
+        runSignal,
+      );
     } catch (error) {
       if (error instanceof EnvironmentError) {
         throw new EnvironmentError(
@@ -246,35 +296,57 @@ export async function runChecks(
 
     const stats = new CleanupStats();
     const cleanupDeps = (deadline: AbortSignal) => ({
-      send: timedSend(client, config.timeoutMs, deadline),
+      send: timedSend(client, config.timeoutMs, deadline, logCall("cleanup")),
       bucket: config.bucket,
       tracker,
       concurrency: config.concurrency,
     });
 
     const selected = checks.filter((c) => config.checkIds.includes(c.id));
-    const results = await mapWithConcurrency(selected, config.concurrency, async (check) => {
-      const result = await runOne(check, config, client, tracker, runSignal, logger);
-      // Clean up as soon as the check ends so data does not linger. The
-      // deadline is independent from the run signal so it survives SIGINT.
-      await cleanupTracked(
-        cleanupDeps(AbortSignal.timeout(config.cleanupTimeoutMs)),
-        stats,
-        check.id,
-      );
-      options.onCheckComplete?.(redactor.redactDeep(result));
-      return result;
-    });
+    let results: CheckResult[] | undefined;
+    let runError: unknown;
+    try {
+      results = await mapWithConcurrency(selected, config.concurrency, async (check) => {
+        const result = await runOne(
+          check,
+          config,
+          client,
+          tracker,
+          runSignal,
+          logCall(check.id),
+          logger,
+        );
+        // Clean up as soon as the check ends so data does not linger. The
+        // deadline is independent from the run signal so it survives SIGINT.
+        await cleanupTracked(
+          cleanupDeps(AbortSignal.timeout(config.cleanupTimeoutMs)),
+          stats,
+          check.id,
+        );
+        notifyComplete(result);
+        return result;
+      });
+    } catch (error) {
+      runError = error;
+    }
 
+    // Always runs, even if the check phase failed unexpectedly. The pool has
+    // drained by now, so nothing can still be writing.
     const cleanupStarted = performance.now();
     const finalDeps = cleanupDeps(AbortSignal.timeout(config.cleanupTimeoutMs));
     await cleanupTracked(finalDeps, stats);
     await sweepRunPrefix(finalDeps, stats);
-    const remaining = await findRemaining(finalDeps, stats);
+    // Verification gets its own short budget so an exhausted cleanup
+    // deadline does not hide what is left.
+    const remaining = await findRemaining(
+      cleanupDeps(AbortSignal.timeout(config.timeoutMs * 2)),
+      stats,
+    );
     const cleanup: CleanupReport = stats.toReport(remaining, performance.now() - cleanupStarted);
     logger?.(
       `cleanup ${cleanup.status}: ${cleanup.deletedObjects} objects deleted, ${cleanup.abortedUploads} uploads aborted`,
     );
+    if (runError !== undefined || !results) throw runError;
 
     const summary = summarize(results);
     const aborted = runSignal.aborted;

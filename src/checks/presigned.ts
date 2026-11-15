@@ -2,6 +2,7 @@ import { GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { deterministicBytes } from "../core/data.js";
 import { ResponseError } from "../core/errors.js";
+import { withTimeout } from "../core/timeout.js";
 import { assertBytesEqual, putObject } from "./helpers.js";
 import { SMALL_OBJECT_SIZE } from "./put.js";
 import type { Check } from "./types.js";
@@ -25,12 +26,11 @@ export const presignedCheck: Check = {
     await putObject(ctx, key, body);
 
     // The URL is a bearer credential: it is never logged or returned.
-    const url = await getSignedUrl(
-      ctx.client,
-      new GetObjectCommand({ Bucket: ctx.bucket, Key: key }),
-      {
+    // Signing may need a credential refresh, so it is bounded like any request.
+    const url = await withTimeout("Presign GetObject", ctx.timeoutMs, ctx.signal, () =>
+      getSignedUrl(ctx.client, new GetObjectCommand({ Bucket: ctx.bucket, Key: key }), {
         expiresIn: EXPIRES_IN_SECONDS,
-      },
+      }),
     );
 
     const { response, body: data } = await ctx.fetch(
