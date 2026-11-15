@@ -1,0 +1,21 @@
+name: Feature or new check
+description: Suggest a feature or a new compatibility check
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What compatibility issue or workflow should this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: For a new check, describe the S3 API calls and the expected responses.
+  - type: textarea
+    id: implementations
+    attributes:
+      label: Known implementation differences
+      description: Which S3-compatible implementations behave differently, if known?
