@@ -110,19 +110,40 @@ Releases are published from GitHub Actions with
 [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers) (OIDC), with
 provenance. No long-lived npm token is stored anywhere.
 
+Trusted Publishing can only be configured for a package that already exists on
+npm, so the first version (`0.1.0`) is published manually, once.
+
 One-time setup (maintainers):
 
-1. Publish the package for the first time, or create it on npmjs.com. Then
-   under **Settings → Trusted publishing**, add a GitHub Actions publisher with
-   the repository and `.github/workflows/release.yml` as the workflow file, and
-   `npm` as the environment.
-2. In the GitHub repository, create an environment named `npm` (optionally with
-   required reviewers).
+1. Make the GitHub repository public and wait for CI on `main` to pass.
+2. Publish the first version from a clean checkout of the release commit:
 
-Each release:
+   ```bash
+   npm ci
+   npm run lint && npm run typecheck && npm test
+   npm pack --dry-run   # review the file list
+   npm publish --access public
+   ```
+
+   This first version has no provenance attestation.
+
+3. On npmjs.com, open the package's **Settings → Trusted publishing** and add a
+   GitHub Actions publisher: repository `akam1o/s3-compat-check`, workflow
+   filename `release.yml` (file name only, not the path), environment `npm`.
+   Allow it to publish directly.
+4. In the GitHub repository, create an environment named `npm` (optionally with
+   required reviewers and a tag rule of `v*.*.*`).
+5. Push the `v0.1.0` tag. The `Release` workflow runs the full CI and then sees
+   that `0.1.0` already exists on npm, so it skips publishing.
+6. Optionally, under the package's **Settings → Publishing access**, require
+   two-factor authentication and disallow tokens, so that only the workflow can
+   publish.
+
+Each later release:
 
 1. Update `CHANGELOG.md` and bump `version` in `package.json`
    (`npm version <patch|minor|major> --no-git-tag-version`).
 2. Commit, then tag: `git tag v<version>` and `git push origin v<version>`.
-3. The `Release` workflow verifies that the tag matches `package.json`, runs all
-   checks, and runs `npm publish --provenance`.
+3. The `Release` workflow runs the full CI (including MinIO E2E, secret
+   scanning and dependency audits), verifies that the tag matches
+   `package.json`, and runs `npm publish --provenance`.

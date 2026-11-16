@@ -11,8 +11,13 @@ permissions:
   contents: read
 
 jobs:
+  ci:
+    name: Full CI
+    uses: ./.github/workflows/ci.yml
+
   publish:
     name: Publish to npm
+    needs: ci
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: npm
@@ -36,11 +41,20 @@ jobs:
             echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${version}" >&2
             exit 1
           fi
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
-      - run: npm pack --dry-run
+      - name: Skip versions that are already published
+        id: published
+        run: |
+          spec="$(node -p 'const p=require("./package.json"); p.name + "@" + p.version')"
+          if npm view "$spec" version >/dev/null 2>&1; then
+            echo "$spec is already on npm (e.g. the manually published first release); skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.published.outputs.skip != 'true'
+        run: npm ci
+      - if: steps.published.outputs.skip != 'true'
+        run: npm run build
+      - if: steps.published.outputs.skip != 'true'
+        run: npm pack --dry-run
       - name: Publish
+        if: steps.published.outputs.skip != 'true'
         run: npm publish --provenance --access public

@@ -78,8 +78,12 @@ npx s3-compat-check --endpoint http://localhost:9000 --bucket test-bucket
 
 ## Installation
 
-You do not need to install anything; `npx s3-compat-check` always runs the
-latest version. Requires **Node.js 22.12 or later**.
+You do not need to install anything: `npx s3-compat-check` downloads the
+package on first use. Requires **Node.js 22.12 or later**.
+
+`npx` prefers a version that is already installed locally or cached. For
+reproducible results, request a version explicitly, e.g.
+`npx s3-compat-check@0.1.0`.
 
 To pin a version in a project or CI:
 
@@ -415,10 +419,12 @@ policy, scoped to the default prefix:
 ```
 
 The final sweep always tries `ListObjectVersions`. On unversioned buckets a
-`403` or `501` there is tolerated. If a write timed out, however, the tool
-cannot know whether it created a version. It then asks `GetBucketVersioning`
-(`s3:GetBucketVersioning`, optional). Cleanup is reported as failed unless the
-bucket was never versioned. On versioned or versioning-suspended buckets, also
+`403` or `501` there is tolerated. Some outcomes are uncertain, however: a write
+that timed out may have created a version, and a fallback plain delete may have
+left a delete marker. Only if such an uncertain outcome occurred **and**
+`ListObjectVersions` is unavailable does the tool ask `GetBucketVersioning`
+(`s3:GetBucketVersioning`, optional). In that case cleanup is reported as failed
+unless the bucket was never versioned. On versioned or versioning-suspended buckets, also
 grant `s3:ListBucketVersions` (bucket) and `s3:DeleteObjectVersion` (objects) so
 that versions and delete markers can be removed. Permission to delete the
 bucket is **not** needed.

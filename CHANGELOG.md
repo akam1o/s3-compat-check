@@ -35,8 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parser diagnostics; argument errors produce fatal JSON in `--format json` mode;
   AWS SDK warnings are never printed.
 - Async `logger` / `onCheckComplete` rejections are swallowed; cleanup after a
-  timed-out write is only reported complete if versions could be verified (or
-  the bucket was never versioned); the final cleanup and its verification stay
+  timed-out write, or after a plain-delete fallback for a rejected `null`
+  version id, is only reported complete if versions could be verified (or the
+  bucket was never versioned); the final cleanup and its verification stay
   within `--cleanup-timeout`; fatal JSON uses `error.type: "interrupted"` for
   interruptions.
 - `checksum` requires a checksum-specific HTTP 400 for a mismatching checksum and fails if a server

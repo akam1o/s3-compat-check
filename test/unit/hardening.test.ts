@@ -93,6 +93,29 @@ describe("versioning-suspended buckets", () => {
     expect(report.cleanup.status).toBe("completed");
   });
 
+  it("does not report a clean sweep after a null fallback it cannot verify", async () => {
+    const fake = new FakeS3();
+    fake.overrides.PutObject = (input, f) => ({
+      ...(f.handle("PutObject", input) as object),
+      VersionId: "null",
+    });
+    fake.overrides.DeleteObject = (input, f) => {
+      if (input.VersionId === "null") throw s3Error(400, "InvalidArgument");
+      return f.handle("DeleteObject", input);
+    };
+    fake.overrides.ListObjectVersions = () => {
+      throw s3Error(403, "AccessDenied");
+    };
+    fake.overrides.GetBucketVersioning = () => ({
+      $metadata: { httpStatusCode: 200 },
+      Status: "Suspended",
+    });
+    const report = await run(fake, { checks: ["put"] });
+    expect(fake.calls).toContain("GetBucketVersioning");
+    expect(report.cleanup.status).toBe("failed");
+    expect(report.ok).toBe(false);
+  });
+
   it("falls back to a plain delete if an explicit null version id is rejected", async () => {
     const fake = new FakeS3();
     fake.objects.set(`${PREFIX}x`, { body: Buffer.from("x"), etag: '"e"' });

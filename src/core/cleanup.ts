@@ -112,6 +112,9 @@ async function deleteKey(
     if (versionId === "null" && info && (info.httpStatus === 400 || info.httpStatus === 501)) {
       // Some implementations reject an explicit "null" version id; fall back to
       // a plain delete, and only stop tracking the version if that succeeds.
+      // On a versioning-suspended bucket a plain delete leaves a null delete
+      // marker, so the result must be verified like an uncertain write.
+      deps.tracker.uncertainWrites = true;
       const ok = await deleteKey(deps, stats, key);
       if (ok) deps.tracker.markDeleted(key, versionId);
       return ok;
