@@ -1,5 +1,7 @@
 # s3-compat-check
 
+English | [日本語](README.ja.md)
+
 **S3 compatibility smoke tests in seconds.**
 
 `s3-compat-check` is a small CLI (and library) that quickly verifies whether an
